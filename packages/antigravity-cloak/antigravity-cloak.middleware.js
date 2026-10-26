@@ -7,6 +7,8 @@
 //   "You are a Claude agent, built on Anthropic's Claude Agent SDK"
 //   "You are Codex, an agent based on GPT-5"         Codex's own prompt
 //   "You are Codex, a coding agent based on GPT-5"   for its GPT-5 models
+//   "Hermes Agent, an intelligent AI assistant created by Nous Research"
+//                    Hermes Agent's earlier default persona (its SOUL.md)
 //
 // (a Codex thread begun on a GPT model keeps its prompt after /model or a
 // fork onto an Antigravity one)
@@ -24,7 +26,7 @@
 // After hexiaolv's magpie-antigravity-cloak (MIT), which does the same to
 // every request whatever provider it goes to.
 
-export const words = ["x-anthropic-billing-header", "Claude Agent SDK", "You are Codex, an agent based on GPT-5", "You are Codex, a coding agent based on GPT-5"]
+export const words = ["x-anthropic-billing-header", "Claude Agent SDK", "You are Codex, an agent based on GPT-5", "You are Codex, a coding agent based on GPT-5", "Hermes Agent, an intelligent AI assistant created by Nous Research"]
 
 const zwsp = "​"
 
