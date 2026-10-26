@@ -166,6 +166,21 @@ itself.
 
 ## Models
 
+Chat responses report the display name from the same model-list entry
+used to build the request, in both JSON completions and every SSE chunk
+(including usage). A blank name or a name equal to the slot key falls
+back to the requested model ID. This shared behavior applies to Qoder,
+Qoder CN, QwenWork and QwenWork Enterprise, including tier labels.
+
+Reporting the name does not fetch the model list again. The existing
+cache and model-list refresh behavior remain in place: a model missing
+from the cache still forces a refresh, and normal list refreshes update
+the configuration and name together. Model-list keys, API IDs,
+`X-Model-Key` and `model_config` are unchanged; slots with the same display
+name remain independently selectable. The name describes the catalog
+entry used for the request, not an attestation of the backend that
+executed it.
+
 The `provider.models` hook reads the account's own list, as Qoder's client
 asks for it (`/algo/api/v2/model/list`). It keeps the enabled models of the
 listing's `app` scene, the list Qoder's app shows and the one a request
