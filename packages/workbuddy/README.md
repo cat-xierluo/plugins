@@ -26,6 +26,15 @@ The package exports `WorkBuddyAuthPlugin` (`workbuddy`) and
 
   WorkBuddy 5.6 and later keep the sign-in encrypted, which only the app
   opens, so this way fails there and says so: use the browser sign-in.
+- **API key** (since 0.1.37). A key made on the build's own keys page
+  (`https://www.workbuddy.cn/profile/keys` for `workbuddy`,
+  `https://www.workbuddy.ai/profile/keys` for `workbuddy-ai`), sent as
+  WorkBuddy's own CLI sends one: `X-API-Key` and `Authorization: Bearer`,
+  both the key, and `X-User-Id: anonymous_<the key's last 8 characters>`,
+  to the same API as the other sign-ins. A key isn't renewed; a refused one
+  says to check it. A key's credits are unknown (WorkBuddy's own client reads
+  none with a key), and its models are `/v3/config`'s only for `ck_`/`pt_`
+  keys, as the CLI asks; any other key keeps the list below.
 
 A browser sign-in is kept as an OpenCode `oauth` auth: the access and
 refresh tokens, their expiry, the user id and the domain; desktop's as a

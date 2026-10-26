@@ -67,6 +67,8 @@ const SITES = {
     authID: "workbuddy-desktop",
     platform: "workbuddy",
     ai: false,
+    // where this build's API keys are made (see keyAccount)
+    keys: "https://www.workbuddy.cn/profile/keys",
     models: CN_MODELS,
     // it serves the Claude models on Anthropic's Messages API too (see
     // nativeOf)
@@ -79,6 +81,7 @@ const SITES = {
     authID: "workbuddy-desktop-ai",
     platform: "workbuddy-ai",
     ai: true,
+    keys: "https://www.workbuddy.ai/profile/keys",
     models: AI_MODELS,
     // models whose images WorkBuddy AI drops though its config says they
     // take them (see textOnly)
@@ -299,7 +302,14 @@ async function refreshed(site, auth) {
 function sign(site, a, headers) {
   headers.set("Authorization", "Bearer " + a.access)
   headers.set("X-User-Id", a.uid ?? "")
-  headers.set("X-Domain", domainOf(site, a))
+  if (a.source === "key") {
+    // the key's own header, and no X-Domain: a key's session has none
+    headers.set("X-API-Key", a.key)
+    headers.delete("X-Domain")
+  } else {
+    headers.delete("X-API-Key")
+    headers.set("X-Domain", domainOf(site, a))
+  }
   headers.set("X-Product", "SaaS")
   headers.set("X-IDE-Type", "WorkBuddy")
   headers.set("User-Agent", "WorkBuddy/" + UA_VERSION)
@@ -312,6 +322,31 @@ function sign(site, a, headers) {
   if (!site.ai) return
   headers.set("X-Agent-Type", "main")
 }
+
+// keyAccount is the account an API key (OpenCode's {type: "api", key}) is
+// sent as, the way WorkBuddy's own CLI sends one (@tencent-ai/codebuddy-code
+// 2.177.0, CODEBUDDY_API_KEY): its API-key sign-in is a session whose access
+// token is the key and whose uid is "anonymous_" and the key's last eight
+// characters (ACC_USER_ID unset), personal, with no domain and no
+// enterprise; and its model requests carry the key twice, X-API-Key and
+// Authorization: Bearer (getCustomHeaders). Its requests go to the build's
+// own host, the one its other sign-ins use: for the China build that is
+// copilot.tencent.com, the CLI's own endpoint for that build
+// (CODEBUDDY_INTERNET_ENVIRONMENT=internal, product.internal.json), and the
+// same API as www.workbuddy.cn, where the keys are made (the CLI's
+// CN_SAAS_CORE_API_FRONT_DOORS); for the international build,
+// www.workbuddy.ai (the CLI's own default, www.codebuddy.ai, is CodeBuddy's,
+// not WorkBuddy's). Nothing renews a key.
+function keyAccount(auth) {
+  const key = typeof auth?.key === "string" ? auth.key.trim() : ""
+  if (!key) return null
+  return { key, access: key, uid: "anonymous_" + key.slice(-8), source: "key" }
+}
+
+// remoteConfig says whether WorkBuddy's own CLI asks /v3/config for the
+// account's models with this key: only for keys that start ck_ or pt_
+// (shouldLoadRemoteConfig); any other key keeps the built-in list.
+const remoteConfig = (key) => /^(ck_|pt_)/.test(key)
 
 // enterpriseHeaders names the enterprise (team) an account signed in as, as
 // WorkBuddy's own client does on every request it makes for that account
@@ -1419,6 +1454,8 @@ async function unanswered(site, a, body, err, signal) {
   if (signal?.aborted || err?.name === "AbortError" || err?.name === "TimeoutError") throw err
   const size = byteLength(body)
   if (size <= EDGE_READS) throw err
+  // the billing API isn't asked with a key: what it answers one is unknown
+  if (a.source === "key") throw err
   let status = 0
   let challenge = ""
   try {
@@ -1544,6 +1581,18 @@ function refusedText(site, a, why, note) {
       ? `Sign in to ${site.name} desktop again; magpie reads its sign-in on the next request.`
       : `Sign in to it again in magpie: Providers → ${site.name} → this account's Sign in again.`)
   )
+}
+
+// keyRefused is the answer to a request WorkBuddy refused an API key for
+// (401): a key isn't renewed, so it says to check the key. Marked expired
+// only on WorkBuddy's word that the token itself is refused (invalidToken).
+function keyRefused(site, expired, note) {
+  const message = `${site.name} refused this API key (401). ${note ? note + " " : ""}Check the key at ${site.keys}, then add it again in magpie: Providers → ${site.name}.`
+  return new Response(JSON.stringify({ error: { message, type: "authentication_error", code: 401 } }), {
+    status: 401,
+    statusText: "Unauthorized",
+    headers: { "content-type": "application/json", "X-Magpie-Sign-In": expired ? "expired" : "kept" },
+  })
 }
 
 // signedOut is the answer to a request WorkBuddy refused this account's
@@ -2007,6 +2056,17 @@ function makePlugin(site) {
       // the account's own list, when it's signed in and WorkBuddy answers;
       // else the list above
       async models(provider, { auth }) {
+        if (auth?.type === "api") {
+          // asked as WorkBuddy's own CLI asks with a key (remoteConfig)
+          const a = keyAccount(auth)
+          if (!a || !remoteConfig(a.key)) return provider.models
+          try {
+            const ms = await liveModels(site, a)
+            return ms.length ? Object.fromEntries(ms.map((m) => [m.id, modelOf(site, provider, m)])) : provider.models
+          } catch {
+            return provider.models
+          }
+        }
         if (auth?.type !== "oauth" || !(auth.access || auth.source)) return provider.models
         try {
           const a = await current(site, client, auth)
@@ -2029,7 +2089,7 @@ function makePlugin(site) {
       refresh: (auth) => refreshed(site, auth),
       async loader(getAuth) {
         const auth = await getAuth()
-        if (auth?.type !== "oauth") return {}
+        if (auth?.type !== "oauth" && auth?.type !== "api") return {}
         return {
           // no baseURL: a model's own api.url says where it is served —
           // <endpoint>/v2 for a chat, <endpoint>/v1 for a Claude model on
@@ -2038,8 +2098,9 @@ function makePlugin(site) {
           apiKey: "",
           async fetch(input, init) {
             const stored = await getAuth()
-            if (stored?.type !== "oauth") throw new Error(`${site.name} isn't signed in`)
-            let a = await current(site, client, stored)
+            const keyed = stored?.type === "api" ? keyAccount(stored) : null
+            if (stored?.type !== "oauth" && !keyed) throw new Error(`${site.name} isn't signed in`)
+            let a = keyed ?? (await current(site, client, stored))
             const req = input instanceof Request ? input : null
             const headers = new Headers(init?.headers ?? req?.headers)
             headers.delete("authorization")
@@ -2096,6 +2157,12 @@ function makePlugin(site) {
               const res = await post(b)
               if (res.status !== 401) return res
               if (renewed) return out("it refused the token renewed for it too", invalidToken(res), res)
+              // a key isn't renewed: the 401 says the key was refused
+              if (a.source === "key") {
+                const r = keyRefused(site, invalidToken(res), edgeNotes.get(res))
+                ours.add(r)
+                return r
+              }
               if (!resendable(b)) return res
               await res.body?.cancel().catch(() => {})
               const r = await reissued(site, client, getAuth, a, stored.access)
@@ -2160,6 +2227,9 @@ function makePlugin(site) {
       // an account lapsed nor cleared it, but for a 401 (gone, below)
       async usage(getAuth) {
         const auth = await getAuth()
+        // WorkBuddy's own CLI reads no credits with a key, and what the
+        // billing API answers one is unknown, so a key's card says so
+        if (auth?.type === "api") return { error: `credits unknown with an API key (WorkBuddy's own client reads none with one); see ${site.keys.replace(/\/profile\/keys$/, "")}`, signIn: "kept" }
         if (auth?.type !== "oauth" || !(auth.access || auth.source)) return { error: "not signed in", signIn: "kept" }
         try {
           let a = await current(site, client, auth)
@@ -2224,6 +2294,13 @@ function makePlugin(site) {
           type: "oauth",
           label: `${site.name} desktop's sign-in`,
           authorize: async () => desktopSignIn(site),
+        },
+        {
+          // a key made at site.keys, sent as WorkBuddy's CLI sends one
+          // (keyAccount)
+          type: "api",
+          label: `${site.name} API key`,
+          placeholder: `from ${site.keys.replace(/^https:\/\//, "")}`,
         },
       ],
     },
@@ -2332,4 +2409,4 @@ export const WorkBuddyAuthPlugin = makePlugin(SITES.workbuddy)
 export const WorkBuddyAIAuthPlugin = makePlugin(SITES["workbuddy-ai"])
 
 // for tests
-export const _internal = { cycleOf, typeUnions, systemAsUser, systemKey, DEFAULT_SYSTEM, EDGE_READS, fitShape, replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf, isMessages, withoutUnsigned, withoutSignedThinking, answeredBefore, nativeOf, modelOf, configModels, API_MESSAGES: NPM_MESSAGES, API_CHAT: NPM }
+export const _internal = { keyAccount, remoteConfig, cycleOf, typeUnions, systemAsUser, systemKey, DEFAULT_SYSTEM, EDGE_READS, fitShape, replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf, isMessages, withoutUnsigned, withoutSignedThinking, answeredBefore, nativeOf, modelOf, configModels, API_MESSAGES: NPM_MESSAGES, API_CHAT: NPM }
