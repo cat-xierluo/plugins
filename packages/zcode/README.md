@@ -156,6 +156,14 @@ number written into the plugin would hold a Max account to a Lite one's
 with no way to raise it. A user who knows their plan's cap sets it on the
 account or the provider in magpie, and magpie's queue follows that.
 
+The coding plan's own limit refusals (1308 five hours, 1310 weekly) are
+rewritten to say "Usage limit reached" and to keep the reset time.
+Magpie's error lists read the vendor's envelope as a rate limit first,
+which rests the whole account — the Start Plan's `-Trial` models on it
+included, however much they still have. Rewritten, magpie reads the
+refusal as out of quota and rests the coding plan alone until the time
+the vendor named; the trial entries go on serving.
+
 ## The usage card
 
 An account with both plans shows both allowances: the coding plan's

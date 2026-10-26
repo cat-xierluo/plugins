@@ -1581,6 +1581,37 @@ function busyAnswer(res, text) {
     statusText: res.statusText,
     headers: h,
   })
+// limitAnswer rewrites a Coding Plan limit refusal (Z.ai/BigModel 1308
+// five-hour, 1310 weekly) so magpie reads it as out of quota, not as a
+// rate limit. The vendor's envelope carries an anthropic
+// rate_limit_error type, whose words match magpie's rate list first, so
+// the account rests whole and its Start Plan (-Trial) models rest with
+// it (magpie#3661 rest-scope thread). The rewritten body keeps the
+// envelope and the code, moves the wording to the used-up phrasing
+// magpie matches, and keeps the reset time, which magpie's zhipu list
+// reads in Beijing time. Auth failures and Start Plan 405/3012 blocks
+// never reach this: they are refused earlier or passed on unchanged.
+const LIMIT_CODES = new Set(["1308", "1310"])
+
+function limitAnswer(res, text) {
+  if (res.status !== 429) return null
+  let v
+  try {
+    v = JSON.parse(text)
+  } catch {
+    return null
+  }
+  if (!v || typeof v !== "object") return null
+  const err = v.error && typeof v.error === "object" ? v.error : {}
+  const code = String(err.code ?? v.code ?? "")
+  if (!LIMIT_CODES.has(code)) return null
+  const said = first(err.message, v.msg, v.message, "")
+  const reset = String(said).match(/\d{4}-\d{1,2}-\d{1,2}[ T]\d{1,2}:\d{2}(?::\d{2})?/)
+  const message = `Usage limit reached (code ${code}).${said ? " " + said : ""}${reset ? " Your limit will reset at " + reset[0] : ""}`
+  const out = err.message !== undefined ? { ...v, error: { ...err, type: "usage_limit_error", message } } : { ...v, msg: message }
+  const h = new Headers(res.headers)
+  h.set("content-type", "application/json")
+  return new Response(JSON.stringify(out), { status: res.status, statusText: res.statusText, headers: h })
 }
 
 function model(m, url) {
@@ -2160,9 +2191,15 @@ export async function ZCodeAuthPlugin({ client }) {
               const text = await res.text()
               const cap = busy(429, text)
               if (!cap || i >= BUSY_WAITS.length) {
-                res = cap
-                  ? busyAnswer(res, text)
-                  : new Response(text, { status: res.status, statusText: res.statusText, headers: res.headers })
+                if (cap) res = busyAnswer(res, text)
+                else {
+                  // a coding plan limit refusal is rewritten here, before
+                  // anything else reads it: magpie would rest the account
+                  // for a rate limit and take the gift models down with it
+                  // (see limitAnswer)
+                  const limited = limitAnswer(res, text)
+                  res = limited ?? new Response(text, { status: res.status, statusText: res.statusText, headers: res.headers })
+                }
                 break
               }
               const w = BUSY_WAITS[i]
@@ -2321,4 +2358,4 @@ export async function ZCodeAuthPlugin({ client }) {
 // config sets what zcodeConfig has read, for tests: null is ZCode's config
 // out of reach, undefined forgets it
 const config = (cfg) => (cfgCache = cfg === undefined ? null : { cfg, at: Date.now() })
-export const _internal = { config, entry, limitWindows, termOf, startUsage, routes, blocked, plansOf, giftOf, dualUsage, claimHint, spentUp, giftServes, modelOf, teamKeys, ownSignIn, stateOf, located, dress, PROMPT, marked, keyDevice, sessionOf, busy, BUSY_WAITS, DEFAULT_CONCURRENCY }
+export const _internal = { config, entry, limitWindows, termOf, startUsage, routes, blocked, plansOf, giftOf, dualUsage, claimHint, spentUp, giftServes, modelOf, teamKeys, ownSignIn, stateOf, located, dress, PROMPT, marked, keyDevice, sessionOf, busy, BUSY_WAITS, DEFAULT_CONCURRENCY, limitAnswer }
