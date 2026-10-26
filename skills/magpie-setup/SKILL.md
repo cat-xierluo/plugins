@@ -96,6 +96,17 @@ magpie codex effort high              # another field (magpie codex --help lists
 magpie claude default                 # take magpie out: back to what it had before
 ```
 
+Subagents can have a model of their own. Set it here rather than asking the
+lead agent to name a model each time, which it does only sometimes:
+
+```sh
+magpie codex subagent_model deepseek/deepseek-chat   # every Codex subagent, whatever its lead asks for
+magpie codex subagent_model group/cheap              # or a routing group
+magpie codex subagent_model default                  # back to the lead's pick
+magpie codex subagent_effort low                     # their reasoning effort
+magpie claude subagent deepseek/deepseek-chat        # Claude Code's subagents
+```
+
 ## Routing groups
 
 A group is several models an agent picks as one. `routing=order` tries them
