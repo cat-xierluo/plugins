@@ -2035,7 +2035,7 @@ export async function ZCodeAuthPlugin({ client, magpie }) {
       options: [{
         key: "start-plan-three-concurrent",
         label: "Start Plan 并发上限",
-        description: "关闭：每账号 2 个；开启：3 个。仅 Start Plan；Pro 不变。",
+        description: "关闭：每个账号最多 2 个同时请求；开启：3 个。超出时排队，按顺序发出。只计 Start Plan 请求，Pro 不变。",
         default: false,
       }],
       async loader(getAuth, provider) {
