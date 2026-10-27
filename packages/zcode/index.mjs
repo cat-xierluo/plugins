@@ -1541,7 +1541,7 @@ function busy(status, text) {
   }
   if (!b || typeof b !== "object") return false
   const say = (v) => (v == null || typeof v === "object" ? "" : String(v))
-  if ([b.code, b.error?.code].some((code) => BUSY_CODES.has(say(code)))) return true
+  if (BUSY_CODES.has(say(b.code) || say(b.error?.code))) return true
   return /concurrency limit exceeded/i.test(say(b.msg) + " " + say(b.message) + " " + say(b.error?.message) + " " + say(b.error))
 }
 
@@ -2051,7 +2051,6 @@ export async function ZCodeAuthPlugin({ client, magpie }) {
             if (!s) throw new Error("not signed in to ZCode")
             let url = input instanceof Request ? input.url : String(input)
             const opts = input instanceof Request ? { method: input.method, headers: input.headers, body: input.body, signal: input.signal, duplex: "half", ...init } : { ...init }
-            opts.signal?.throwIfAborted()
             const { start: alone, gift: known } = await plansOf(s)
             let gift = known
             let key = s.key
@@ -2138,7 +2137,7 @@ export async function ZCodeAuthPlugin({ client, magpie }) {
             }
             const forward = async () => {
               const ask = () => {
-                opts.signal?.throwIfAborted()
+                if (start) opts.signal?.throwIfAborted()
                 return fetch(url, { ...opts, headers: h })
               }
               let res = await ask()
@@ -2152,14 +2151,13 @@ export async function ZCodeAuthPlugin({ client, magpie }) {
                   continue
                 }
                 if (!cap || i >= BUSY_WAITS.length) {
-                  if (cap) res = busyAnswer(res, text)
-                  else {
-                    res = new Response(text, { status: res.status, statusText: res.statusText, headers: res.headers })
-                  }
+                  res = cap
+                    ? busyAnswer(res, text)
+                    : new Response(text, { status: res.status, statusText: res.statusText, headers: res.headers })
                   break
                 }
                 const w = BUSY_WAITS[i]
-                await waitForTrial(Math.round(w * (0.75 + Math.random() * 0.5)), opts.signal)
+                await sleep(Math.round(w * (0.75 + Math.random() * 0.5)))
                 res = await ask()
               }
               if (start && res.status >= 400) {

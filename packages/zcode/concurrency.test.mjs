@@ -123,6 +123,18 @@ test("a Pro cap that outlasts the waits keeps its original bounded retry", async
   expect(said).toContain("ZCode serves one account a few requests at a time")
 })
 
+test("Pro 1308 and 1310 responses pass through unchanged", async () => {
+  for (const code of [1308, 1310]) {
+    const envelope = { error: { type: "rate_limit_error", code, message: "vendor limit", reset_time: "2030-01-01" } }
+    answer = () => Response.json(envelope, { status: 429 })
+    got.length = 0
+    const res = await one({ pro: true })
+    expect(res.status).toBe(429)
+    expect(JSON.parse(res.text)).toEqual(envelope)
+    expect(got.length).toBe(1)
+  }
+})
+
 // bodyThatFails is this plugin's fetch answered with a head and one chunk,
 // then a body that fails while it is being read: a connection the vendor
 // dropped mid-body, or the abort magpie sends when an agent's request goes

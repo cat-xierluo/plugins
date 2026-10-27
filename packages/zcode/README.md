@@ -184,6 +184,7 @@ account; this plugin neither transfers sign-ins nor changes group order.
 When gifts are claimed, refresh usage and the model catalog and confirm
 that the Trial entries are exposed. No background workload or artificial
 token consumption is started by the plugin.
+
 ## The usage card
 
 An account with both plans shows both allowances: the coding plan's
