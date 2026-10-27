@@ -93,8 +93,8 @@ test("native option controls per-account Trial concurrency and Pro never reads i
   const hooks = await ZCodeAuthPlugin({ client: {}, magpie })
   expect(hooks.auth.options).toEqual([{
     key: "start-plan-three-concurrent",
-    label: "Start Plan: 3 concurrent requests per account",
-    description: "Off: 2; on: 3. Trial only; Pro is unchanged.",
+    label: "Start Plan 并发上限",
+    description: "关闭：每账号 2 个；开启：3 个。仅 Start Plan；Pro 不变。",
     default: false,
   }])
   const a = await client("a", magpie), b = await client("b", magpie)

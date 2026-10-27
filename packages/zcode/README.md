@@ -139,10 +139,10 @@ never read or buffered on the way.
 This private candidate limits only requests sent to the Start Plan: two
 in flight per account by default, shared by all of that account's gift models.
 In the native Provider editor, use the **Plugin options** switch
-**Start Plan: 3 concurrent requests per account** to choose three instead;
-off means two, on means three. The switch applies only to Trial; Pro is
-unchanged. Changes are read for each Trial request. Increasing the limit
-can release queued calls; decreasing it leaves in-flight calls alone.
+**Start Plan 并发上限** to choose three instead; off means two, on means
+three. The switch applies only to Trial; Pro is unchanged. Changes are read
+for each Trial request. Increasing the limit can release queued calls;
+decreasing it leaves in-flight calls alone.
 Calls wait in FIFO order; each account has its own pool. Slots remain held
 until the response body finishes, fails, or is cancelled. Ordinary Coding
 Plan requests bypass the pool. The plugin declares no account-wide
