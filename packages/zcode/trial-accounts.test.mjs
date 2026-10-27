@@ -45,9 +45,9 @@ function signIn(account) {
   return { type: "oauth", access: s.key, refresh: JSON.stringify(s), expires: 0 }
 }
 
-async function client(account) {
+async function client(account, magpie) {
   const auth = signIn(account)
-  const hooks = await ZCodeAuthPlugin({ client: { auth: { set: async () => {} } } })
+  const hooks = await ZCodeAuthPlugin({ client: { auth: { set: async () => {} } }, magpie })
   const loader = await hooks.auth.loader(async () => auth, { id: "zcode" })
   return async (trial = true, { signal } = {}) => {
     const response = await loader.fetch("https://api.z.ai/api/anthropic/v1/messages", {
@@ -85,6 +85,47 @@ const busy = (code = 3008) => Response.json({
   code,
   msg: code === 3009 ? "model concurrency limit exceeded" : "user concurrency limit exceeded",
 }, { status: 429 })
+
+test("native option controls per-account Trial concurrency and Pro never reads it", async () => {
+  let enabled = false
+  const reads = []
+  const magpie = { option(provider, key) { reads.push([provider, key]); return enabled } }
+  const hooks = await ZCodeAuthPlugin({ client: {}, magpie })
+  expect(hooks.auth.options).toEqual([{
+    key: "start-plan-three-concurrent",
+    label: "Start Plan: 3 concurrent requests per account",
+    description: "Off: 2; on: 3. Trial only; Pro is unchanged.",
+    default: false,
+  }])
+  const a = await client("a", magpie), b = await client("b", magpie)
+  let release
+  const hold = new Promise((resolve) => { release = resolve })
+  const active = { a: 0, b: 0 }
+  fakeVendor(async (url, headers) => {
+    if (url.hostname !== "zcode.z.ai") return message()
+    active[accountOf(headers)]++
+    await hold
+    return message()
+  })
+  const pending = [a(), a(), a(), b(), b(), b()]
+  try {
+    for (let i = 0; i < 100 && reads.length < 6; i++) await Bun.sleep(1)
+    expect(reads).toHaveLength(6)
+    expect(reads.every(([provider, key]) => provider === "zcode" && key === "start-plan-three-concurrent")).toBe(true)
+    expect(active).toEqual({ a: 2, b: 2 })
+    expect((await a(false)).status).toBe(200)
+    expect(reads).toHaveLength(6)
+    enabled = true
+    pending.push(a())
+    for (let i = 0; i < 100 && (active.a < 3 || active.b < 3); i++) await Bun.sleep(1)
+    expect(active).toEqual({ a: 3, b: 3 })
+    expect(reads).toHaveLength(7)
+  } finally {
+    release()
+    await Promise.all(pending)
+    state.trialPool.setLimit(2)
+  }
+})
 
 test("six Trial calls use both sign-ins while each fake vendor pool serves two", async () => {
   const existingLanes = state.trialPool?.accounts.size ?? 0

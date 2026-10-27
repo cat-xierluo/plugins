@@ -39,6 +39,13 @@ export class TrialPool {
     this.accounts = new Map()
   }
 
+  setLimit(limit) {
+    if (!Number.isInteger(limit) || limit < 1) throw new Error("invalid Trial concurrency")
+    if (limit === this.limit) return
+    this.limit = limit
+    for (const [key, lane] of this.accounts) this.drain(key, lane)
+  }
+
   acquire(key, signal) {
     signal?.throwIfAborted()
     let lane = this.accounts.get(key)

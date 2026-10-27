@@ -1,6 +1,37 @@
 import { expect, test } from "bun:test"
 import { TrialPool, trialAccountKey, waitForTrial } from "./trial-pool.mjs"
 
+test("changing the shared limit drains each lane and preserves in-flight calls", async () => {
+  const pool = new TrialPool(2)
+  const releases = await Promise.all([
+    pool.acquire("a"), pool.acquire("a"), pool.acquire("b"), pool.acquire("b"),
+  ])
+  const queuedA = pool.acquire("a"), queuedB = pool.acquire("b")
+  expect(pool.accounts.get("a").queue.length).toBe(1)
+  expect(pool.accounts.get("b").queue.length).toBe(1)
+  pool.setLimit(3)
+  const thirdA = await queuedA, thirdB = await queuedB
+  expect(pool.accounts.get("a").active).toBe(3)
+  expect(pool.accounts.get("b").active).toBe(3)
+  pool.setLimit(2)
+  let entered = false
+  const next = pool.acquire("a").then((release) => { entered = true; return release })
+  releases[0]()
+  await Promise.resolve()
+  expect(entered).toBe(false)
+  expect(pool.accounts.get("a").active).toBe(2)
+  releases[1]()
+  const releaseNext = await next
+  expect(entered).toBe(true)
+  expect(pool.accounts.get("a").active).toBe(2)
+  releases.forEach((release) => release())
+  thirdA()
+  thirdB()
+  releaseNext()
+  expect(pool.accounts.size).toBe(0)
+  expect(() => pool.setLimit(0)).toThrow()
+})
+
 test("one account has two slots, another has its own two slots", async () => {
   const pool = new TrialPool(2)
   const releases = await Promise.all([

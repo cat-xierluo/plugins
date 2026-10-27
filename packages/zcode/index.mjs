@@ -1519,7 +1519,7 @@ function kept(res, text) {
   return new Response(text !== undefined ? text : res.body, { status: res.status, statusText: res.statusText, headers: h })
 }
 
-// Only requests sent to the Start Plan share these two slots per account.
+// Only requests sent to the Start Plan share these slots per account.
 // Coding Plan requests bypass this pool and have no plugin-imposed cap.
 const trialPool = new TrialPool(2)
 const BUSY_CODES = new Set(["3008", "3009"])
@@ -1957,7 +1957,7 @@ function sessionOf(id, device) {
 
 // ---- the plugin ------------------------------------------------------------------
 
-export async function ZCodeAuthPlugin({ client }) {
+export async function ZCodeAuthPlugin({ client, magpie }) {
   const log = (message) => {
     try {
       client?.app?.log?.({ body: { service: "zcode-auth", level: "error", message } })
@@ -2032,6 +2032,12 @@ export async function ZCodeAuthPlugin({ client }) {
     },
     auth: {
       provider: PROVIDER,
+      options: [{
+        key: "start-plan-three-concurrent",
+        label: "Start Plan: 3 concurrent requests per account",
+        description: "Off: 2; on: 3. Trial only; Pro is unchanged.",
+        default: false,
+      }],
       async loader(getAuth, provider) {
         const s0 = stateOf(await getAuth())
         if (!s0) return {}
@@ -2185,7 +2191,9 @@ export async function ZCodeAuthPlugin({ client }) {
               }
               return done(kept(res))
             }
-            return start ? trialPool.run(trialAccountKey(auth, s), opts.signal, forward) : forward()
+            if (!start) return forward()
+            trialPool.setLimit(magpie?.option?.(PROVIDER, "start-plan-three-concurrent") === true ? 3 : 2)
+            return trialPool.run(trialAccountKey(auth, s), opts.signal, forward)
           },
         }
       },

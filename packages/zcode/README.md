@@ -137,12 +137,19 @@ never read or buffered on the way.
 ## A few at once
 
 This private candidate limits only requests sent to the Start Plan: two
-in flight per account, shared by all of that account's gift models.
+in flight per account by default, shared by all of that account's gift models.
+In the native Provider editor, use the **Plugin options** switch
+**Start Plan: 3 concurrent requests per account** to choose three instead;
+off means two, on means three. The switch applies only to Trial; Pro is
+unchanged. Changes are read for each Trial request. Increasing the limit
+can release queued calls; decreasing it leaves in-flight calls alone.
 Calls wait in FIFO order; each account has its own pool. Slots remain held
 until the response body finishes, fails, or is cancelled. Ordinary Coding
 Plan requests bypass the pool. The plugin declares no account-wide
 `maxConcurrency`; an explicit account or provider limit set in Magpie
-still applies and is not changed by this plugin.
+still applies across models and is not changed by this plugin. The ordinary
+Concurrency setting is account-wide, and this switch is not a native model
+numeric field.
 Pool identity uses a stable user ID, account name or key. Sign-ins with
 none of these share a conservative pool per site instead of gaining new
 slots when their session token changes.
