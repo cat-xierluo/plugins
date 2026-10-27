@@ -1581,6 +1581,9 @@ function busyAnswer(res, text) {
     statusText: res.statusText,
     headers: h,
   })
+
+}
+
 // limitAnswer rewrites a Coding Plan limit refusal (Z.ai/BigModel 1308
 // five-hour, 1310 weekly) so magpie reads it as out of quota, not as a
 // rate limit. The vendor's envelope carries an anthropic
