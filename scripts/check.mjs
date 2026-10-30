@@ -62,7 +62,8 @@ for (const name of readdirSync(root)) {
         await hooks.config(cfg)
         const p = cfg.provider[auth.provider]
         const signInOnly = hooks.tool && p?.models && !Object.keys(p.models).length && !p.npm
-        if (p && !signInOnly) {
+        const dynamicOnly = auth.noStaticModels === true && (!p?.models || !Object.keys(p.models).length)
+        if (p && !signInOnly && !dynamicOnly) {
           needsLoader = true
           if (!p.npm || !p.models || !Object.keys(p.models).length) problems.push(`${fn.name}: config gives ${auth.provider} no npm or models`)
         }

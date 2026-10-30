@@ -29,6 +29,9 @@ const BIGMODEL_API = "https://bigmodel.cn" // BigModel's business API, where ZCo
 const ZAI_BASE = "https://api.z.ai/api/anthropic"
 const BIGMODEL_BASE = "https://open.bigmodel.cn/api/anthropic"
 const START_BASE = ZCODE + "/api/v1/zcode-plan/anthropic"
+const START_PROVIDER = "zcode-start"
+const ZCODE_ICON = "data:image/png;base64," + readFileSync(new URL("./zcode-icon.png", import.meta.url)).toString("base64")
+const START_ICON = "data:image/png;base64," + readFileSync(new URL("./zcode-start-icon.png", import.meta.url)).toString("base64")
 const APP_VERSION = "3.16.3" // the ZCode whose sign-in this makes
 const UA = "ZCode/" + APP_VERSION
 
@@ -162,6 +165,23 @@ const giftSpent = (x) => {
   return total !== undefined && used !== undefined && used >= total
 }
 
+const giftEntitlement = (p, x) => (Array.isArray(p.entitlements) ? p.entitlements : [])
+  .find((e) => e.entitlement_id && String(e.entitlement_id) === String(x.entitlement_id))
+const giftEffectiveAt = (p, x) => Math.max(0, num(p.starts_at) ?? 0, num(x.effective_at) ?? 0,
+  num(x.period_start) ?? 0, num(giftEntitlement(p, x)?.effective_at) ?? 0)
+// A plan can be granted more than once; an ambiguous balance must not
+// borrow an older grant's start time and activate a future entitlement.
+const giftOwner = (plans, x) => {
+  const matches = plans.filter((p) => x.user_plan_id && p.user_plan_id
+    ? String(x.user_plan_id) === String(p.user_plan_id)
+    : String(x.plan_id ?? "") === String(p.plan_id ?? ""))
+  const exact = matches.filter((p) => x.user_plan_id && String(p.user_plan_id) === String(x.user_plan_id))
+  if (exact.length === 1) return exact[0]
+  if (matches.length === 1) return matches[0]
+  const entitled = matches.filter((p) => giftEntitlement(p, x))
+  return entitled.length === 1 ? entitled[0] : undefined
+}
+
 // startPlan is the gift an account can spend now ({models}), as ZCode reads
 // its balance: several plans can be active at once, and a model routes to
 // the gift when any of them has a live bucket serving it — a bucket past
@@ -172,7 +192,6 @@ async function startPlan(jwt, device) {
   if (jwtExpired(jwt)) throw new Error(EXPIRED)
   const b = (await call("GET", `${ZCODE}/api/v1/zcode-plan/billing/balance?app_version=${APP_VERSION}`, { auth: "Bearer " + jwt, device })) ?? {}
   const now = num(b.server_time) > 0 ? num(b.server_time) : Date.now() / 1000
-  const same = (x, p) => (x.user_plan_id && p.user_plan_id ? x.user_plan_id === p.user_plan_id : String(x.plan_id ?? "") === String(p.plan_id ?? ""))
   const plans = Array.isArray(b.plans) ? b.plans : []
   const balances = Array.isArray(b.balances) ? b.balances : []
   const ms = new Set(), all = new Map()
@@ -186,11 +205,22 @@ async function startPlan(jwt, device) {
     any = true
     if (end > 0) ttl = Math.min(ttl, (end - now) * 1000)
     if (!name) name = String(p?.name ?? "").trim()
+    const start = giftEffectiveAt(p, {})
+    if (start > now) ttl = Math.min(ttl, (start - now) * 1000)
+    for (const e of Array.isArray(p.entitlements) ? p.entitlements : []) {
+      const effective = giftEffectiveAt(p, e)
+      if (effective > now) ttl = Math.min(ttl, (effective - now) * 1000)
+    }
     for (const x of balances) {
-      if (!same(x, p)) continue
+      if (giftOwner(plans, x) !== p) continue
       const exp = num(x.expires_at)
       if (exp > 0 && exp <= now) continue
       if (exp > 0) ttl = Math.min(ttl, (exp - now) * 1000)
+      const effective = giftEffectiveAt(p, x)
+      if (effective > now) {
+        ttl = Math.min(ttl, (effective - now) * 1000)
+        continue
+      }
       // Spent buckets still declare models; only live ones can spend now.
       for (const m of bucketModels(x)) {
         if (!all.has(m.toLowerCase())) all.set(m.toLowerCase(), m)
@@ -520,33 +550,32 @@ function startNum(v) {
   return undefined
 }
 
-// notStarted is a plan whose starts_at is still to come (a Start Plan
-// that takes effect at 23:00 today, windy on Discord): it serves nothing
-// yet, so no request is routed to it and its buckets don't count, but the
-// card names it with its start. ZCode's balance gives every plan a
-// starts_at in Unix seconds; which status a plan not started yet carries
-// is not known, so any but "expired" is taken.
+// notStarted is a plan whose own starts_at is still to come. Entitlements
+// can start later still; giftOf shows those separately with their effective
+// time, while startPlan refuses to spend either one before it is real.
 function notStarted(p, now) {
-  const at = startNum(p?.starts_at)
+  const at = giftEffectiveAt(p, {})
   return at > now && String(p?.status ?? "").trim().toLowerCase() !== "expired"
 }
 
-// PENDING is the card's line for a gift plan that has not started yet: a
-// fixed sentence, so magpie translates it; the plan's name and its start,
-// in this computer's time, are the display. Set aside: it stops nothing.
+// PENDING is Magpie's translated line for a plan whose start is known only
+// at plan level. An entitlement with its own effective_at gets a richer
+// line below, including the grant amount and the actual entitlement time.
 const PENDING = "ZCode gift plan not started yet"
 const two = (n) => String(n).padStart(2, "0")
 const localTime = (sec) => {
   const d = new Date(Math.trunc(sec) * 1000)
   return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`
 }
-const pendingLines = (g) => (g?.pending ?? []).map((p) => ({ name: PENDING, used: 0, aside: true, display: `${p.name} · ${localTime(p.start)}` }))
+const pendingTime = (sec) => new Date(Math.trunc(sec) * 1000)
+  .toLocaleString("zh-CN", { hourCycle: "h23", timeZoneName: "short" })
+const pendingLines = (g) => (g?.pending ?? []).map((p) => p.rich
+  ? { name: `${p.model || p.name} · 待生效`, used: 0, aside: true, display: `${p.amount ?? "额度待发放"} · 生效：${pendingTime(p.start)}` }
+  : { name: PENDING, used: 0, aside: true, display: `${p.name} · ${localTime(p.start)}` })
 
 // giftOf reads the balance and returns the gift's card fields: its plans and
-// windows. Several plans can be active at once, so every live plan's buckets
-// show, each keeping its own models and end; the plan and end put on the
-// card (for a gift-only account) are the soonest-ending live plan's. null
-// when there is no live plan to show.
+// windows. A live plan's buckets show; future entitlements show as aside
+// lines only and never count as allowance or model entries.
 async function giftOf(s) {
   if (!s.jwt) throw new Error("not signed in to ZCode")
   if (jwtExpired(s.jwt)) throw new Error(EXPIRED)
@@ -554,33 +583,13 @@ async function giftOf(s) {
   const str = (v) => (typeof v === "string" ? v : "")
   const plans = (Array.isArray(b.plans) ? b.plans : []).map((p) => ({ ...p, status: str(p?.status), user_plan_id: str(p?.user_plan_id), plan_id: str(p?.plan_id) }))
   const now = startNum(b.server_time) > 0 ? startNum(b.server_time) : Math.trunc(Date.now() / 1000)
-  const over = new Set()
   for (const p of plans) {
     const end = startNum(p.ends_at)
     if (end > 0 && end <= now && p.status.trim().toLowerCase() === "active") p.status = "expired"
-    if (p.status.trim().toLowerCase() === "expired") over.add(p.user_plan_id + "\0" + p.plan_id)
   }
-  const same = (x, p) => (x.user_plan_id && p.user_plan_id ? x.user_plan_id === p.user_plan_id : String(x.plan_id ?? "") === String(p.plan_id ?? ""))
   const balances = (Array.isArray(b.balances) ? b.balances : [])
     .map((x) => ({ ...x, user_plan_id: str(x?.user_plan_id), plan_id: str(x?.plan_id) }))
-    .filter((x) => {
-      let keep = true
-      for (const p of plans) {
-        if (!same(x, p)) continue
-        keep = !over.has(p.user_plan_id + "\0" + p.plan_id)
-        if (keep) break
-      }
-      return keep
-    })
 
-  // a plan not started yet is named with its start, soonest first; its
-  // buckets, if the balance lists any, wait for it
-  const pending = plans.filter((p) => notStarted(p, now))
-    .map((p) => ({ name: first(str(p.name), "Start Plan"), start: startNum(p.starts_at) }))
-    .sort((a, b) => a.start - b.start)
-
-  // every live plan counts as the gift: no plan-name filter decides it,
-  // the balance says what the session can spend
   let active = null
   for (const p of plans) {
     if (p.status.trim().toLowerCase() !== "active" || notStarted(p, now)) continue
@@ -589,20 +598,48 @@ async function giftOf(s) {
     if (active && !(end > 0 && (!startNum(active.end) || end < startNum(active.end)))) continue
     active = { name: first(str(p.name), "Start Plan"), end, until: end > 0 ? new Date(Math.trunc(end) * 1000).toISOString() : "" }
   }
-  if (!active && !pending.length) return null
-  // with no live plan, the one starting soonest names the card
-  const out = { plan: active?.name ?? pending[0].name, windows: [], live: !!active, pending }
-  if (active?.until) Object.assign(out, { until: active.until, renew: "off" })
   const live = plans.filter((p) => {
     if (p.status.trim().toLowerCase() !== "active" || notStarted(p, now)) return false
     const end = startNum(p.ends_at)
     return !(end > 0 && end <= now)
   })
+  const futurePlans = plans.filter((p) => notStarted(p, now))
+  const out = { plan: active?.name ?? futurePlans[0]?.name ?? "Start Plan", windows: [], live: !!active, pending: [] }
+  if (active?.until) Object.assign(out, { until: active.until, renew: "off" })
+  if (!active && !futurePlans.length) return null
+
+  const planKey = (p) => `${p.user_plan_id}\0${p.plan_id}\0${p.name}`
+  const shown = new Set()
+  const addPending = (p, x, effective) => {
+    const entitlement = giftEntitlement(p, x)
+    const explicit = [x?.effective_at, x?.period_start, entitlement?.effective_at].some((v) => startNum(v) !== undefined)
+    const total = startNum(x.total_units) ?? startNum(x.grant_units) ?? startNum(entitlement?.grant_units)
+    const unit = first(str(x.unit_type), str(entitlement?.unit_type), "units")
+    const model = first(str(x.show_name), str(entitlement?.show_name), bucketModels(x).join(", "), bucketModels(entitlement ?? {}).join(", "), "Start Plan")
+    out.pending.push({
+      name: first(str(p.name), "Start Plan"), model, start: effective, rich: explicit,
+      amount: total === undefined ? undefined : `${compact(total)} ${unit === "token" ? "tokens" : unit}`,
+      planKey: planKey(p),
+    })
+  }
+  const impossible = (p, effective, exp = undefined) =>
+    (startNum(p.ends_at) > 0 && effective >= startNum(p.ends_at)) || (exp !== undefined && exp > 0 && effective >= exp)
+
+  // A balance can be created before its entitlement starts. It is visible
+  // as an aside line, but never becomes allowance or a model entry.
   for (const x of balances) {
-    const owner = live.find((p) => same(x, p))
-    if (!owner) continue
+    const owner = giftOwner(plans, x)
+    if (!live.includes(owner)) continue
     const exp = startNum(x.expires_at)
-    if (exp > 0 && exp <= now) continue // a bucket past its own end is over
+    if (exp > 0 && exp <= now) continue
+    const effective = giftEffectiveAt(owner, x)
+    if (effective > now) {
+      if (!impossible(owner, effective, exp)) {
+        addPending(owner, x, effective)
+        shown.add(giftEntitlement(owner, x))
+      }
+      continue
+    }
     const total = startNum(x.total_units), left = startNum(x.remaining_units)
     let used = startNum(x.used_units)
     if (total === undefined && used === undefined && left === undefined) continue
@@ -611,8 +648,6 @@ async function giftOf(s) {
     const w = { name: base, used: 0, _plan: str(owner.name), _spent: giftSpent(x) }
     if (used === undefined) used = total !== undefined && left !== undefined ? total - left : 0
     if (total > 0) {
-      // the bucket's count as amount of limit, as the Coding windows' is
-      // (#659): magpie says it as used or as left, as it says the share
       w.used = (100 * used) / total
       w.amount = used
       w.limit = total
@@ -620,13 +655,7 @@ async function giftOf(s) {
     }
     if (w._spent) w.used = Math.max(100, w.used)
     if (exp > 0) w.resetsAt = new Date(Math.trunc(exp) * 1000).toISOString()
-    let span = 0
-    for (const p of plans) {
-      if (!same(x, p)) continue
-      for (const e of Array.isArray(p.entitlements) ? p.entitlements : []) {
-        if (str(e?.entitlement_id) === str(x.entitlement_id)) span = periodOf(str(e?.period))
-      }
-    }
+    let span = periodOf(str(giftEntitlement(owner, x)?.period))
     if (!span) {
       const a = startNum(x.period_start), z = startNum(x.period_end)
       if (a !== undefined && z !== undefined && z > a) span = Math.trunc(z - a)
@@ -634,7 +663,28 @@ async function giftOf(s) {
     if (span) w.span = span
     if (models.length) w.models = models
     out.windows.push(w)
+    shown.add(giftEntitlement(owner, x))
   }
+
+  // ZCode can grant an entitlement before it creates its spendable balance.
+  // Keep that grant visible even when the balance is absent, expired, or
+  // too ambiguous to attribute to an older grant of the same plan.
+  for (const p of live) {
+    for (const e of Array.isArray(p.entitlements) ? p.entitlements : []) {
+      const effective = giftEffectiveAt(p, e)
+      if (effective <= now || impossible(p, effective) || shown.has(e)) continue
+      addPending(p, e, effective)
+    }
+  }
+
+  // Plans with only a future starts_at (and no explicit entitlement time)
+  // keep the official card wording and remain translatable by Magpie.
+  for (const p of futurePlans) {
+    if (!out.pending.some((x) => x.planKey === planKey(p))) {
+      out.pending.push({ name: first(str(p.name), "Start Plan"), start: giftEffectiveAt(p, {}), planKey: planKey(p) })
+    }
+  }
+  out.pending.sort((a, b) => a.start - b.start)
   return out
 }
 
@@ -1753,11 +1803,11 @@ async function askBusy(u, o, hs) {
   return res
 }
 
-function model(m, url) {
+function model(m, url, providerID = PROVIDER) {
   const e = entry(m)
   return {
     id: m.id,
-    providerID: PROVIDER,
+    providerID,
     name: m.id,
     api: { id: m.id, url, npm: "@ai-sdk/anthropic" },
     status: "active",
@@ -2139,9 +2189,23 @@ function sessionOf(id, device) {
   return uuidOf(own ? "zcode-session\0" + own : "zcode-session-device\0" + (device ?? ""))
 }
 
+// mirrorStartAccount keeps the same OAuth sign-in under zcode-start, where
+// Magpie gives the Start Plan lane its own provider-level rest key. The
+// identity suffix stays the same as the account's tokens rotate.
+async function mirrorStartAccount(client, auth) {
+  if (auth?.type !== "oauth") return
+  const identity = [auth.uid, auth.accountId, auth.refresh, auth.access]
+    .find((v) => (typeof v === "string" && v.trim()) || typeof v === "number")
+  const suffix = createHash("sha256").update(JSON.stringify(identity ?? null)).digest("hex").slice(0, 12)
+  try {
+    await client?.auth?.set?.({ path: { id: `${START_PROVIDER}#${suffix}` }, body: auth })
+  } catch {}
+}
+
 // ---- the plugin ------------------------------------------------------------------
 
-export async function ZCodeAuthPlugin({ client }, options = {}) {
+async function makeZCodePlugin({ client, magpie }, startLane = false, options = {}) {
+  const providerID = startLane ? START_PROVIDER : PROVIDER
   const log = (message) => {
     try {
       client?.app?.log?.({ body: { service: "zcode-auth", level: "error", message } })
@@ -2162,46 +2226,64 @@ export async function ZCodeAuthPlugin({ client }, options = {}) {
     // in the request, goes on as x-session-id (sessionOf)
     "chat.headers": async (input, output) => {
       const provider = input?.model?.providerID ?? input?.provider?.info?.id
-      if (provider !== PROVIDER) return
+      if (provider !== providerID) return
       const id = input?.sessionID
       if (typeof id === "string" && id.trim()) output.headers["x-session-id"] = sessionOf(id)
     },
     config: async (cfg) => {
-      cfg.provider ??= {}
-      const was = cfg.provider[PROVIDER] ?? {}
-      cfg.provider[PROVIDER] = {
-        name: "ZCode",
-        npm: "@ai-sdk/anthropic",
-        api: ZAI_BASE + "/v1",
-        ...was,
-        models: { ...Object.fromEntries(MODELS.map((m) => [m.id, entry(m)])), ...(was.models ?? {}) },
-      }
+        cfg.provider ??= {}
+        if (startLane) {
+          const was = cfg.provider[START_PROVIDER] ?? {}
+          cfg.provider[START_PROVIDER] = {
+            ...was,
+            name: was.name ?? "ZCode Start Plan",
+            npm: was.npm ?? "@ai-sdk/anthropic",
+            api: was.api ?? START_BASE + "/v1",
+          }
+          return
+        }
+        const was = cfg.provider[PROVIDER] ?? {}
+        cfg.provider[PROVIDER] = {
+          name: "ZCode",
+          npm: "@ai-sdk/anthropic",
+          api: ZAI_BASE + "/v1",
+          ...was,
+          models: { ...Object.fromEntries(MODELS.map((m) => [m.id, entry(m)])), ...(was.models ?? {}) },
+        }
     },
     provider: {
-      id: PROVIDER,
+      id: providerID,
       // the account's plan's models, as ZCode's config lists them now
       async models(provider, { auth } = {}) {
-        // a ZCode 3.16 sign-in holds only where its key is: read the key
-        // first, as a request does, or plansOf takes the keyless sign-in
-        // for a Start Plan one and lists that plan's models (#439). A key
-        // that can't be read throws, and magpie keeps the list it had.
-        const s = await located(stateOf(auth))
-        if (!s) return provider.models
-        const { start, gift: known } = await plansOf(s).catch(() => ({ start: false, gift: null }))
-        const gift = start ? await startPlan(s.jwt, s.device).catch(() => null) : known
+        const stored = stateOf(auth)
+        if (!stored) return startLane ? {} : provider?.models ?? {}
+        if (!startLane) await mirrorStartAccount(client, auth)
+        // A normal-lane ZCode 3.16 sign-in holds only where its key is; read
+        // the key first as a request does (#439). The Start lane is keyless.
+        const s = startLane ? stored : await located(stored)
+        if (!s) return startLane ? {} : provider?.models ?? {}
+        let start = true
+        let gift = null
+        if (startLane) {
+          gift = await startPlan(s.jwt, s.device).catch(() => null)
+        } else {
+          ({ start, gift } = await plansOf(s).catch(() => ({ start: false, gift: null })))
+          if (start) gift = await startPlan(s.jwt, s.device).catch(() => null)
+        }
         const base = start ? START_BASE : s.base
-        const cfg = await zcodeConfig().catch(() => null)
+        const cfg = startLane ? null : await zcodeConfig().catch(() => null)
         let ms = modelsOf(cfg, planID(base))
         // ZCode's config can't be had: its table stands in, and magpie keeps
         // the list it was told last, as the built-in keeps the one it fetched last
         const fell = !ms.length
         if (fell) ms = start ? START_MODELS : MODELS
-        const url = s.base + "/v1"
-        const out = Object.fromEntries(ms.map((m) => [m.id, model(m, url)]))
+        const url = startLane ? START_BASE + "/v1" : s.base + "/v1"
+        const out = Object.fromEntries(ms.map((m) => [m.id, model(m, url, providerID)]))
         const details = [...ms, ...modelsOf(cfg, planID(START_BASE)), ...modelsOf(cfg, planID(ZAI_BASE)), ...MODELS]
         const about = (raw) => details.find((m) => m.id.toLowerCase() === raw.toLowerCase()) ?? { efforts: [] }
         const has = new Set(Object.keys(out).map((id) => id.toLowerCase()))
-        for (const raw of giftNames(gift)) {
+        const names = startLane ? (gift?.models ?? []).filter((raw) => giftUsable(s, gift, raw)) : giftNames(gift)
+        for (const raw of names) {
           // a gift-only account's models are its gift's, by their own
           // names, as ZCode lists them (its Start Plan's GLM-5.3, which the
           // plan's config leaves out): every request of it goes to the gift
@@ -2209,12 +2291,13 @@ export async function ZCodeAuthPlugin({ client }, options = {}) {
           if (start && !has.has(raw.toLowerCase())) {
             const plain = about(raw).id ?? raw
             has.add(raw.toLowerCase())
-            out[plain] = model({ ...about(raw), id: plain }, url)
+            out[plain] = model({ ...about(raw), id: plain }, url, providerID)
           }
-          const id = giftID(raw)
-          if (out[id]) continue
-          out[id] = model({ ...about(raw), id }, url)
+          const alias = giftID(raw)
+          if (out[alias]) continue
+          out[alias] = model({ ...about(raw), id: alias }, url, providerID)
         }
+        if (startLane) return Object.fromEntries(Object.entries(out).filter(([id]) => id.toLowerCase().endsWith("-trial")))
         // a fallback tells magpie to keep the list it was told last, which
         // predates the gift read just made: an account whose gift lists
         // trial entries is told this list, so ZCode's config out of reach
@@ -2224,41 +2307,29 @@ export async function ZCodeAuthPlugin({ client }, options = {}) {
       },
     },
     auth: {
-      provider: PROVIDER,
-      // a plan serves one account a few requests at a time: magpie's own
-      // field, so its queue spaces what the agents ask for before the vendor
-      // sees it. This is a default, not a cap the plugin enforces — a plan's
-      // own cap follows its tier (Max > Pro > Lite) and the time of day, and
-      // a user who knows theirs can raise this on the account
+      provider: providerID,
+      icon: startLane ? START_ICON : ZCODE_ICON,
+      ...(startLane ? { noStaticModels: true } : {}),
+      // Keep the official native queue default; account concurrency remains
+      // user-adjustable in Magpie.
       maxConcurrency: DEFAULT_CONCURRENCY,
       async loader(getAuth, provider) {
         const s0 = stateOf(await getAuth())
         if (!s0) return {}
-        const id = provider?.id ?? PROVIDER
+        const accountID = provider?.id ?? providerID
         return {
-          baseURL: s0.base + "/v1",
-          apiKey: s0.key || "zcode", // the fetch below puts the real one on
+          baseURL: startLane ? START_BASE + "/v1" : s0.base + "/v1",
+          apiKey: startLane ? "zcode" : s0.key || "zcode", // the fetch below puts the real one on
           async fetch(input, init) {
             const auth = await getAuth()
-            const s = await located(stateOf(auth))
+            const stored = stateOf(auth)
+            const s = startLane ? stored : await located(stored)
             if (!s) throw new Error("not signed in to ZCode")
             let url = input instanceof Request ? input.url : String(input)
             const opts = input instanceof Request ? { method: input.method, headers: input.headers, body: input.body, signal: input.signal, duplex: "half", ...init } : { ...init }
-            const { start: alone, gift: known } = await plansOf(s)
-            let gift = known
-            let key = s.key
-            if (isTeam(s) && !key) {
-              key = await teamKey(s)
-              if (auth?.type === "oauth") {
-                const next = { ...auth, refresh: JSON.stringify({ ...s, key }), access: key }
-                await client?.auth?.set?.({ path: { id }, body: next }).catch?.(() => {})
-              }
-            }
             // a dual account's body is read ahead of sending, so a gift that
             // says it is spent can spend nothing and replay what was asked for
-            let start = alone
-            let orig, forcedGift = false, freeGift = false
-            let asked = ""
+            let orig, requested = "", forcedGift = false, freeGift = false, asked = ""
             let renamed = false
             const done = (res) => (renamed ? searchNamed(res) : res)
             if (opts.body != null) {
@@ -2271,8 +2342,32 @@ export async function ZCodeAuthPlugin({ client }, options = {}) {
                 orig = opts.body = plain.text
                 renamed = true
               }
-              let m = modelOf(orig)
-              asked = m
+              requested = modelOf(orig)
+              asked = requested
+            }
+            if (startLane && !requested.toLowerCase().endsWith("-trial")) {
+              const error = { type: "invalid_request_error", message: "zcode-start serves only Start Plan -Trial models" }
+              return kept(new Response(JSON.stringify({ type: "error", error }), { status: 400, headers: { "content-type": "application/json" } }))
+            }
+            let alone = false
+            let gift = null
+            let known = null
+            let key = s.key
+            if (startLane) {
+              gift = await startPlan(s.jwt, s.device).catch(() => null)
+            } else {
+              ({ start: alone, gift: known } = await plansOf(s))
+              gift = known
+              if (isTeam(s) && !key) {
+                key = await teamKey(s)
+                if (auth?.type === "oauth") {
+                  const next = { ...auth, refresh: JSON.stringify({ ...s, key }), access: key }
+                  await client?.auth?.set?.({ path: { id: accountID }, body: next }).catch?.(() => {})
+                }
+              }
+            }
+            if (opts.body != null) {
+              let m = requested
               if (m.toLowerCase().endsWith("-trial")) {
                 gift ??= await startPlan(s.jwt, s.device).catch(() => null)
                 const raw = giftModel(gift, m)
@@ -2298,8 +2393,8 @@ export async function ZCodeAuthPlugin({ client }, options = {}) {
                 m = raw
                 freeGift = true
               }
-              start = alone || forcedGift || freeGift
             }
+            const start = startLane || alone || forcedGift || freeGift
             const swap = (base) => {
               for (const b of [START_BASE, ZAI_BASE, BIGMODEL_BASE]) {
                 if (url.startsWith(b)) {
@@ -2477,16 +2572,18 @@ export async function ZCodeAuthPlugin({ client }, options = {}) {
         const auth = await getAuth()
         const s = stateOf(auth)
         if (!s) return { error: "not signed in", signIn: "kept" }
-        try {
-          await located(s)
-        } catch (e) {
-          return { error: e.message, signIn: "kept" }
+        if (!startLane) {
+          try {
+            await located(s)
+          } catch (e) {
+            return { error: e.message, signIn: "kept" }
+          }
         }
         // every card starts from the plan the sign-in saved, as magpie's
         // built-in did: a reply without a level, a team detail that
         // failed or an error keeps it
-        const saved = (out) => {
-          const plan = s.plan || auth?.plan
+        const saved = (out, keepPlan = true) => {
+          const plan = keepPlan ? s.plan || auth?.plan : ""
           if (plan && !out.plan) out.plan = plan
           // MCP reads as a footnote: its window goes last on the card
           if (Array.isArray(out.windows) && out.windows.some((w) => w.name === "MCP · Month"))
@@ -2499,6 +2596,8 @@ export async function ZCodeAuthPlugin({ client }, options = {}) {
           // so a plan bought, a gift claimed or a plan lapsed reaches the
           // requests when the card shows it, not ten minutes later (#379)
           routes.delete(s.key + "\0" + s.jwt)
+          if (!startLane) await mirrorStartAccount(client, auth)
+          if (startLane) return saved(await startUsage(s), false)
           const { start, gift } = await plansOf(s)
           let card
           if (isTeam(s)) {
@@ -2507,7 +2606,7 @@ export async function ZCodeAuthPlugin({ client }, options = {}) {
               key = await teamKey(s)
               if (auth?.type === "oauth") {
                 const next = { ...auth, refresh: JSON.stringify({ ...s, key }), access: key }
-                await client?.auth?.set?.({ path: { id: provider?.id ?? PROVIDER }, body: next }).catch?.(() => {})
+                await client?.auth?.set?.({ path: { id: provider?.id ?? providerID }, body: next }).catch?.(() => {})
               }
             }
             const team = await teamUsage(s, key)
@@ -2527,21 +2626,30 @@ export async function ZCodeAuthPlugin({ client }, options = {}) {
           }
           return card
         } catch (e) {
-          return saved({ error: e?.message ?? String(e) })
+          return saved({ error: e?.message ?? String(e) }, !startLane)
         }
       },
       // the daily claim of ZCode's gift plans (#503): magpie runs it once a
       // day per account while Settings' Daily check-in has ZCode on (off
       // until the user turns it on), and its Check in now button asks
-      // right away. See claimDaily.
-      async checkin(getAuth) {
-        try {
-          return await claimDaily(stateOf(await getAuth()))
-        } catch (e) {
-          return { outcome: "failed", message: e?.message ?? String(e) }
+      // right away. The Start lane reuses the normal lane's sign-ins, so it
+      // does not claim the same plans twice.
+      ...(startLane ? {} : {
+        async checkin(getAuth) {
+          try {
+            return await claimDaily(stateOf(await getAuth()))
+          } catch (e) {
+            return { outcome: "failed", message: e?.message ?? String(e) }
+          }
         }
-      },
-      methods: [
+      }),
+      methods: startLane ? [{
+        type: "oauth",
+        label: "ZCode Start Plan (uses ZCode sign-ins)",
+        authorize: () => {
+          throw new Error("zcode-start reuses ZCode's sign-ins; add or refresh the account under ZCode, then refresh providers")
+        },
+      }] : [
         oauth("zai"),
         oauth("bigmodel"),
         // a team's plan beside the account's own (#285): the sign-ins above
@@ -2581,6 +2689,14 @@ export async function ZCodeAuthPlugin({ client }, options = {}) {
       ],
     },
   }
+}
+
+export async function ZCodeAuthPlugin(args, options = {}) {
+  return makeZCodePlugin(args, false, options)
+}
+
+export async function ZCodeStartAuthPlugin(args, options = {}) {
+  return makeZCodePlugin(args, true, options)
 }
 
 // for tests

@@ -2,7 +2,7 @@
 
 Signs in to Z.ai's GLM Coding Plan, or BigModel's (智谱). It does this the
 way [ZCode](https://zcode.z.ai) does, and serves the plan's GLM models
-over Anthropic's Messages API. Provider id: `zcode`.
+over Anthropic's Messages API. Provider ids: `zcode` and `zcode-start`.
 
 ## Signing in
 
@@ -93,6 +93,50 @@ In OpenCode's `auth.json` (magpie: `plugin-auth.json`), under `zcode`:
 
 The plugin never writes ZCode's own credential store. It reads it only for
 the ZCode app's sign-in (`refresh` then holds `"source": "zcode"`).
+
+## The Start Plan lane
+
+`zcode-start` is a second provider from this package for Start Plan
+allowances. It lists only live `<model>-Trial` entries and has no static
+model table: when an account has no active gift bucket it lists no models,
+rather than exposing a normal model that would fail with a 400.
+
+Granted plans whose entitlements have a future `effective_at` appear on
+the usage card even before ZCode creates their balances. Each pending line
+shows the grant amount and its effective time in the host's local timezone,
+marked `待生效` and set aside from routing and quota caps. Plan `starts_at`
+and bucket `period_start` are respected too. Reaching the effective time
+alone does not invent a balance: a fresh model/usage read must see a real
+eligible bucket before the model becomes available.
+
+The lane reuses the OAuth accounts already signed in under `zcode`. When
+the normal provider reads models or usage, the plugin mirrors each OAuth
+sign-in to `zcode-start#<stable identity hash>`. The hash comes from the
+account's uid or account id, so token rotation does not create another
+account. Refresh providers after the first mirror is created. The
+placeholder sign-in shown under `zcode-start` only explains this; add or
+refresh the account under `zcode`.
+
+The Start Plan card reads the gift balance alone, not the coding plan's
+windows. Its separate provider id also gives Magpie a separate
+provider-level rest key, so a coding-plan refusal does not directly rest
+the Start Plan lane. Magpie's account selection, group routing and rest
+behavior still need runtime verification.
+
+**Concurrency.** Both lanes use Magpie's native provider queue and declare
+the official default. Magpie's per-account concurrency is set per provider,
+so `zcode-start` accounts can be capped independently
+(`magpie provider account-concurrency zcode-start <account> <n>`).
+
+To express the intended order, arrange `zcode-start` accounts personal
+before team and put the routing group's members in the order personal
+normal model, Start Plan `-Trial` model, team normal model. Magpie owns
+account and group order; the plugin does not reorder either.
+
+Magpie's plugin client cannot enumerate existing mirrors, so removing an
+account under `zcode` does not automatically remove its `zcode-start`
+copy. Remove that account under `zcode-start` as well. A stale mirror
+with no active gift stays hidden from the model list.
 
 ## How requests are routed
 
