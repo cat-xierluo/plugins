@@ -312,10 +312,13 @@ test("a team seat: the team plan's windows, name, end and resets, its key found 
     ],
   })
   expect(made).toEqual({ name: "zcode-team-api-key", keyType: 2 })
-  expect(sets.length).toBe(1)
-  expect(sets[0].path).toEqual({ id: "zcode" })
-  expect(sets[0].body.access).toBe("tk.ts")
-  expect(JSON.parse(sets[0].body.refresh)).toEqual({ ...state, key: "tk.ts", device: expect.any(String) })
+  expect(sets.length).toBe(2)
+  const mirror = sets.find((set) => /^zcode-start#[0-9a-f]{12}$/.test(set.path.id))
+  const saved = sets.find((set) => set.path.id === "zcode")
+  expect(mirror).toBeDefined()
+  expect(saved).toBeDefined()
+  expect(saved.body.access).toBe("tk.ts")
+  expect(JSON.parse(saved.body.refresh)).toEqual({ ...state, key: "tk.ts", device: expect.any(String) })
 })
 
 test("Z.ai's refusals are the card's error", async () => {
